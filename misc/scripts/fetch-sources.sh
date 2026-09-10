@@ -349,7 +349,7 @@ function deb_down() {
     { ignore_stack=false; set -o pipefail; trap stacktrace ERR RETURN; }
     hashcheck_down
     local upgrade=false
-    if is_package_installed "${pacname}" && type -t pre_upgrade &> /dev/null; then
+    if is_package_installed "${pacname}" && is_function pre_upgrade; then
         upgrade=true
         fancy_message sub $"Running %s hook" "pre_upgrade"
         if ! pre_upgrade; then
@@ -357,7 +357,7 @@ function deb_down() {
             fancy_message error $"Could not run %s hook successfully" "preinst"
             exit 1
         fi
-    elif type -t pre_install &> /dev/null; then
+    elif is_function pre_install; then
         fancy_message sub $"Running %s hook" "pre_install"
         if ! pre_install; then
             error_log 5 "pre_install hook"
@@ -371,14 +371,14 @@ function deb_down() {
             sudo apt-mark auto "${gives:-$pacname}" 2> /dev/null
         fi
         fancy_message info $"Performing post install operations"
-        if type -t post_upgrade &> /dev/null && ${upgrade}; then
+        if is_function post_upgrade && ${upgrade}; then
             fancy_message sub $"Running %s hook" "post_upgrade"
             if ! post_upgrade; then
                 error_log 5 "post_upgrade hook"
                 fancy_message error $"Could not run %s hook successfully" "postinst"
                 exit 1
             fi
-        elif type -t post_install &> /dev/null; then
+        elif is_function post_install; then
             fancy_message sub $"Running %s hook" "post_install"
             if ! post_install; then
                 error_log 5 "post_install hook"
@@ -570,6 +570,7 @@ function set_distro() {
     { ignore_stack=false; set -o pipefail; trap stacktrace ERR RETURN; }
     local distro_name distro_version_name distro_version_number distro_parent distro_parent_vname distro_parent_number
     calc_distro
+
     if [[ ${1} == "parent" ]]; then
         if [[ ${2} == "number" ]]; then
             echo "${distro_parent_number:-${distro_version_number}}"
@@ -625,18 +626,25 @@ function get_compatible_releases() {
 function get_incompatible_releases() {
     { ignore_stack=false; set -o pipefail; trap stacktrace ERR RETURN; }
     # example for this function is "ubuntu:jammy"
-    local distro_name distro_version_name distro_version_number distro_parent distro_parent_vname distro_parent_number incomp_list=("${@,,}")
+    local distro_name distro_version_name distro_version_number distro_parent distro_parent_vname distro_parent_number incomp_list=("${@}") incomp_keys=() key reason
     calc_distro
 
+    for key in "${incomp_list[@]}"; do
+        key="${key,,}"
+        incomp_keys+=("${key%%\[*}")
+    done
 
-    if ! array.contains incomp_list "${distro_name}:${distro_version_name}" && \
-        ! array.contains incomp_list "${distro_name}:${distro_version_number}" && \
-        ! array.contains incomp_list "${distro_name}:*" && \
-        ! array.contains incomp_list "*:${distro_version_name}" && \
-        ! array.contains incomp_list "*:${distro_version_number}"; then
+    if ! array.contains incomp_keys "${distro_name}:${distro_version_name}" && \
+        ! array.contains incomp_keys "${distro_name}:${distro_version_number}" && \
+        ! array.contains incomp_keys "${distro_name}:*" && \
+        ! array.contains incomp_keys "*:${distro_version_name}" && \
+        ! array.contains incomp_keys "*:${distro_version_number}"; then
         if [[ -n ${distro_parent_vname} ]] && \
-            { array.contains incomp_list "*:${distro_parent_vname}" || \
-            array.contains incomp_list "*:${distro_parent_number}";
+            { array.contains incomp_keys "${distro_parent}:${distro_parent_vname}" || \
+            array.contains incomp_keys "${distro_parent}:${distro_parent_number}" || \
+            array.contains incomp_keys "${distro_parent}:*" || \
+            array.contains incomp_keys "*:${distro_parent_vname}" || \
+            array.contains incomp_keys "*:${distro_parent_number}";
         }; then
             distro_name="${distro_parent}"
             distro_version_name="${distro_parent_vname}"
@@ -645,28 +653,50 @@ function get_incompatible_releases() {
             fi
         fi
     fi
-    for key in "${incomp_list[@]}"; do
+    for incompat in "${incomp_list[@]}"; do
+        key="${incompat,,}"
+        key="${key%%\[*}"
+        if [[ ${incompat} =~ "[" ]]; then
+            reason="${incompat#*\[}"
+            if [[ ${reason} != "${incompat}" ]]; then
+                reason="${reason%\]}"
+            fi
+        fi
+
         # check for `*:jammy`
         if [[ $key == "*:"* ]]; then
             # check for `22.04` or `jammy`
             if [[ ${key#*:} == "${distro_version_number}" || ${key#*:} == "${distro_version_name}" ]]; then
-                fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_version_name}${NC}/${BBlue}${distro_version_number}${NC}"
+                if [[ -n ${reason} ]]; then
+                    fancy_message error $"This Pacscript does not work on %b: %b" "${BBlue}${distro_version_name}${NC}/${BBlue}${distro_version_number}${NC}" "${reason}"
+                else
+                    fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_version_name}${NC}/${BBlue}${distro_version_number}${NC}"
+                fi
                 { ignore_stack=true; return 1; }
             fi
         # check for `ubuntu:*`
         elif [[ $key == *":*" ]]; then
             # check for `ubuntu`
             if [[ ${key%%:*} == "${distro_name}" ]]; then
-                fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_name}${NC}"
+                if [[ -n ${reason} ]]; then
+                    fancy_message error $"This Pacscript does not work on %b: %b" "${BBlue}${distro_name}${NC}" "${reason}"
+                else
+                    fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_name}${NC}"
+                fi
                 { ignore_stack=true; return 1; }
             fi
         else
             # check for `ubuntu:jammy` or `ubuntu:22.04`
             if [[ $key == "${distro_name}:${distro_version_name}" || $key == "${distro_name}:${distro_version_number}" ]]; then
-                fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_name}:${distro_version_name}${NC}/${BBlue}${distro_name}:${distro_version_number}${NC}"
+                if [[ -n ${reason} ]]; then
+                    fancy_message error $"This Pacscript does not work on %b: %b" "${BBlue}${distro_name}:${distro_version_name}${NC}/${BBlue}${distro_name}:${distro_version_number}${NC}" "${reason}"
+                else
+                    fancy_message error $"This Pacscript does not work on %b" "${BBlue}${distro_name}:${distro_version_name}${NC}/${BBlue}${distro_name}:${distro_version_number}${NC}"
+                fi
                 { ignore_stack=true; return 1; }
             fi
         fi
+    unset key reason
     done
 }
 

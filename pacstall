@@ -558,7 +558,7 @@ function select_options() {
                         select_options "$message" "$length" "$varname"
                         ;;
                 esac
-                out+=($(seq "${split_arr[0]}" "${split_arr[1]}"))
+                mapfile -t -O"${#out[@]}" out < <(seq "${split_arr[0]}" "${split_arr[1]}")
                 continue
             else
                 out+=("$i")
@@ -620,7 +620,7 @@ function is_array() {
 
 function is_function() {
     { ignore_stack=false; set -o pipefail; trap stacktrace ERR RETURN; }
-    if [[ $(type -t "${1}") == "function" ]]; then
+    if declare -F "${1}" &> /dev/null; then
         return 0
     else
         { ignore_stack=true; return 1; }
@@ -659,7 +659,7 @@ function getMasks() {
 
 function getMasks_offending_pkg() {
     { ignore_stack=false; set -o pipefail; trap stacktrace ERR RETURN; }
-    local the_name="${1}"
+    local the_name="${1}" pkgs
     mapfile -t pkgs < <(pacstall -L)
     if ((${#pkgs[@]} == 0)); then
         return 0
@@ -708,11 +708,13 @@ fi
 # Separate grouped short options
 argument_list=()
 
+shopt -s extglob
+
 for i in "${@}"; do
     # Just add argument if doesn't start with exactly one hyphen.
     if ! [[ ${i} =~ ^-[^-] ]]; then
         # if argument is '-B', '-P', '-K' or '-Nc', add to beginning of argument list.
-        if [[ ${i} == "--build" || ${i} == "--disable-prompts" || ${i} == "--keep" || ${i} == "--nocheck" || ${i} == "--quiet" || ${i} == "--nosandbox" ]]; then
+        if [[ ${i} == --@(build|disable-prompts|keep|nocheck|quiet|nosandbox) ]]; then
             argument_list=("${i}" "${argument_list[@]}")
         else
             argument_list+=("${i}")
@@ -725,7 +727,7 @@ for i in "${@}"; do
     # Arguments start with uppercase except 'h'.
     for j in $(sed -E 's/[[:upper:]]|h/ &/g' <<< "${i:1}"); do
         # If current string is 'B', 'P', 'K' or 'Nc', add to beginning of argument list.
-        if [[ ${j} == "B" || ${j} == "P" || ${j} == "K" || ${j} == "Nc" || ${j} == "Q" || ${j} == "Ns" ]]; then
+        if [[ ${j} == @(B|P|K|Nc|Q|Ns) ]]; then
             argument_list=("-${j}" "${argument_list[@]}")
         else
             argument_list+=("-${j}")
@@ -733,6 +735,8 @@ for i in "${@}"; do
     done
     unset j
 done
+
+shopt -u extglob
 
 # Remove duplicates
 declare -A arg_map=(
@@ -779,6 +783,9 @@ function lock() {
     local ignore_long="--search --download --add-repo --remove-repo --version --tree --search-description --search-info --cache-info --help"
     local ignore="$ignore_short $ignore_long"
 
+    local valid
+    local -a instances
+
     ((EUID != 0)) && { ignore_stack=true; return 1; }
 
     for ((i = 1; i <= option_flags + 1; i++)); do
@@ -794,14 +801,14 @@ function lock() {
     if [[ -f "$SCRIPTDIR/repo/pacstallrepo.pacstall-qa.bak" ]] || [[ $PACSTALL_ELEVATED ]]; then
         valid=2
         [[ -f "$SCRIPTDIR/repo/pacstallrepo.pacstall-qa.bak" ]] && [[ $PACSTALL_ELEVATED ]] && valid=3
-        instances=($(pidof -o %PPID -x "$0"))
-        if [[ ${#instances[@]} -lt $valid ]]; then
+        mapfile -t instances < <(pidof -o %PPID -x "$0" -d $'\n')
+        if (( ${#instances[@]} < valid )); then
             { ignore_stack=true; return 1; }
         fi
         return 0
     fi
 
-    pidof -o %PPID -x "$0" > /dev/null && return 0 || { ignore_stack=true; return 1; }
+    pidof -q -o %PPID -x "$0" && return 0 || { ignore_stack=true; return 1; }
 }
 
 while lock $@; do
